@@ -88,8 +88,69 @@ C [Relatable Pain]: [hook text]
 ━━━ 🎥 B-ROLL NOTES ━━━
 [What to show on screen at each beat — specific, actionable]`;
 
-// ─── State store for topic memory ────────────────────────────────────────────
+// ─── LinkedIn System Prompt ──────────────────────────────────────────────────
+const LINKEDIN_SYSTEM_PROMPT = `You are a LinkedIn content strategist for a tech company founder in India.
+You specialise in creating high-engagement LinkedIn posts that build authority,
+drive conversations, and position the founder as a thought leader in tech.
+
+CREATOR PROFILE:
+- Platform: LinkedIn
+- Audience: Tech professionals, founders, recruiters, investors in India & globally
+- Tone: Professional, authoritative, thought-provoking — not promotional, not casual
+- Language: Professional English with personality — confident but humble
+- Niche: AI Tools, Productivity, Startup Insights, Tech Trends, Developer Culture
+
+POST TYPES (alternate between these):
+1. Hot Take — Bold opinion on trending tech topic
+2. Personal Story — Relatable founder/developer experience with a lesson
+3. How-To / Framework — Actionable insights in a structured format
+4. Industry Insight — Data-backed observation about tech trends
+5. Contrarian View — Challenge a popular belief with reasoning
+
+STRUCTURE:
+- Lines 1-3: HOOK — Bold statement, question, or surprising fact (MUST grab attention)
+- Lines 4-6: CONTEXT — Why this matters, what changed, or personal connection
+- Lines 7-12: INSIGHT — 3 key points or the main breakdown
+- Lines 13-15: CONCLUSION — The takeaway or big picture
+- Line 16: CTA — Question to spark comments
+- End: 5-7 hashtags
+
+LINKEDIN BEST PRACTICES:
+- First 3 lines are critical — most people read without clicking "see more"
+- Use line breaks between thought groups for readability
+- Use specific numbers: "3 ways", "47% faster", "2 years of"
+- Keep paragraphs short (1-3 lines each)
+- End with a question to drive comments (boosts reach)
+- Hashtags: mix of large (1M+), medium (100k-1M), niche (<100k)
+
+OUTPUT FORMAT — always respond in this exact structure:
+
+📌 TOPIC: [topic name]
+🔥 TYPE: [Hot Take / Personal Story / How-To / Industry Insight / Contrarian View]
+📊 ENGAGEMENT POTENTIAL: High / Medium / Low
+
+━━━ 📝 LINKEDIN POST ━━━
+
+[Line 1 — Hook]
+[Line 2 — Hook contd.]
+
+[Line 3 — Context start]
+[Line 4 — Context contd.]
+
+[Line 5 — Insight 1]
+[Line 6 — Insight 2]
+[Line 7 — Insight 3]
+
+[Line 8 — Conclusion / Takeaway]
+
+[Line 9 — CTA question]
+
+━━━ #️⃣ HASHTAGS ━━━
+[5-7 hashtags — 1 large 1M+, 2-3 medium 100k-1M, 2 niche <100k]`;
+
+// ─── State stores ─────────────────────────────────────────────────────────────
 const userSessions = {};
+const linkedinSessions = {};
 
 // ─── Helper: call Claude API ──────────────────────────────────────────────────
 async function generateScript(userMessage, chatId) {
@@ -121,6 +182,77 @@ async function generateScript(userMessage, chatId) {
   return assistantText;
 }
 
+// ─── Helper: generate LinkedIn post ────────────────────────────────────────────
+async function generateLinkedInPost(userMessage, chatId) {
+  const history = linkedinSessions[chatId] || [];
+
+  const messages = [
+    { role: "system", content: LINKEDIN_SYSTEM_PROMPT },
+    ...history,
+    { role: "user", content: userMessage },
+  ];
+
+  const model = process.env.OPENROUTER_MODEL || "openai/gpt-4o-mini";
+
+  const response = await openrouter.chat.completions.create({
+    model,
+    max_tokens: 2000,
+    messages,
+  });
+
+  const assistantText = response.choices[0].message.content;
+
+  // Keep last 4 exchanges
+  linkedinSessions[chatId] = [
+    ...history,
+    { role: "user", content: userMessage },
+    { role: "assistant", content: assistantText },
+  ].slice(-8);
+
+  return assistantText;
+}
+
+// ─── Helper: generate image ───────────────────────────────────────────────────
+async function generateImage(prompt) {
+  const model =
+    process.env.LINKEDIN_IMAGE_MODEL || "black-forest-labs/flux-dev";
+  const size = process.env.LINKEDIN_IMAGE_SIZE || "1024x1024";
+
+  const response = await openrouter.images.generate({ model, prompt, n: 1, size });
+  const imageUrl = response.data[0].url;
+
+  const imgRes = await fetch(imageUrl);
+  return Buffer.from(await imgRes.arrayBuffer());
+}
+
+// ─── Helper: extract topic from post output ───────────────────────────────────
+function extractTopic(text) {
+  const match = text.match(/📌 TOPIC:\s*(.+)/);
+  return match ? match[1].trim() : null;
+}
+
+// ─── Helper: send post with optional image ────────────────────────────────────
+async function sendLinkedInPost(chatId, postText, imagePrompt) {
+  await bot.sendMessage(chatId, postText, { parse_mode: "Markdown" });
+
+  if (imagePrompt) {
+    try {
+      const imgBuffer = await generateImage(imagePrompt);
+      await bot.sendPhoto(chatId, imgBuffer, {
+        caption: `🎨 *AI-generated image for this post*\n\n_"${imagePrompt}"_`,
+        parse_mode: "Markdown",
+      });
+    } catch (imgErr) {
+      console.error("Image generation failed:", imgErr);
+      await bot.sendMessage(
+        chatId,
+        `⚠️ *Couldn't generate image.*\nYou can post the text above directly on LinkedIn.`,
+        { parse_mode: "Markdown" }
+      );
+    }
+  }
+}
+
 // ─── Helper: get today's date string ─────────────────────────────────────────
 function getTodayString() {
   return new Date().toLocaleDateString("en-IN", {
@@ -139,15 +271,19 @@ bot.onText(/\/start/, (msg) => {
 
   bot.sendMessage(
     chatId,
-    `🎬 *Hey ${firstName}! Welcome to your Reels Script Bot.*\n\n` +
-      `I generate perfect 60-second Instagram Reel scripts for your tech brand — tailored, structured, and ready to film.\n\n` +
-      `*Here's what I can do:*\n` +
-      `📅 /today — Generate today's reel script (AI picks the best trending topic)\n` +
-      `🎯 /topic [idea] — Script for a specific topic you have in mind\n` +
-      `💡 /ideas — Get 5 hot reel ideas for this week\n` +
-      `🔄 /regenerate — Regenerate the last script with a fresh angle\n` +
+    `🎬 *Hey ${firstName}! Welcome to your Content Bot.*\n\n` +
+      `I generate content for your tech brand — Instagram Reels scripts AND LinkedIn posts, with optional AI-generated images.\n\n` +
+      `*📱 Instagram Reels:*\n` +
+      `📅 /today — Today's reel (AI picks trending topic)\n` +
+      `🎯 /topic [idea] — Script for a specific topic\n` +
+      `💡 /ideas — 5 hot reel ideas for this week\n` +
+      `🔄 /regenerate — Fresh version of last script\n\n` +
+      `*💼 LinkedIn Posts:*\n` +
+      `📅 /li-today — Today's LinkedIn post (trending tech topic)\n` +
+      `🎯 /li-topic [idea] — Post for a specific topic\n` +
+      `🔄 /li-regenerate — Fresh version of last post\n\n` +
       `❓ /help — Show all commands\n\n` +
-      `_Start with_ /today _to get your first script!_`,
+      `_Start with_ /today _or_ /li-today _to get started!_`,
     { parse_mode: "Markdown" }
   );
 });
@@ -157,15 +293,21 @@ bot.onText(/\/help/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
     `📖 *Commands*\n\n` +
-      `/today — Today's reel script (topic auto-selected)\n` +
-      `/topic [your idea] — Script for a custom topic\n` +
+      `*📱 Instagram Reels*\n` +
+      `/today — Today's reel script (AI picks trending topic)\n` +
+      `/topic [idea] — Script for a custom topic\n` +
       `   _e.g. /topic ChatGPT vs Gemini_\n` +
       `/ideas — 5 reel ideas for this week\n` +
       `/regenerate — Fresh version of last script\n` +
       `/niche [category] — Focus on a niche\n` +
-      `   _e.g. /niche AI tools_ or _/niche productivity_\n\n` +
+      `   _e.g. /niche AI tools_\n\n` +
+      `*💼 LinkedIn Posts*\n` +
+      `/li-today — Today's LinkedIn post (AI picks trending topic)\n` +
+      `/li-topic [idea] — Post for a custom topic\n` +
+      `   _e.g. /li-topic AI in healthcare_\n` +
+      `/li-regenerate — Fresh version of last post\n\n` +
       `💬 Or just *type any topic freely* and I'll script it!\n\n` +
-      `_Every script includes: Hook options, timestamped script, caption, hashtags & B-roll notes._`,
+      `_LinkedIn posts include an AI-generated image! (if image model is configured)_`,
     { parse_mode: "Markdown" }
   );
 });
@@ -312,6 +454,92 @@ bot.onText(/\/niche (.+)/, async (msg, match) => {
     await bot.sendMessage(chatId, `📂 *Script — ${niche} Niche*\n\n${script}`, {
       parse_mode: "Markdown",
     });
+  } catch (err) {
+    clearInterval(typing);
+    console.error(err);
+    bot.sendMessage(chatId, `❌ Something went wrong. Try again!`);
+  }
+});
+
+// ─── /li-today command ────────────────────────────────────────────────────────
+bot.onText(/\/li-today/, async (msg) => {
+  const chatId = msg.chat.id;
+  const today = getTodayString();
+
+  const typing = setInterval(() => bot.sendChatAction(chatId, "typing"), 4000);
+  bot.sendChatAction(chatId, "typing");
+
+  try {
+    const prompt = `Today is ${today}. I need a LinkedIn post for my tech company's page.
+    Pick the MOST relevant, trending, or timely tech topic for today — something that would spark conversations on LinkedIn right now for an Indian tech audience.
+    Choose from: AI tools, productivity hacks, programming insights, startup stories, gadget news, or tech industry trends.`;
+
+    const post = await generateLinkedInPost(prompt, chatId);
+    clearInterval(typing);
+
+    const topic = extractTopic(post) || "today's trending tech topic";
+    const imagePrompt = `Professional LinkedIn post banner, tech topic: ${topic}, minimalist corporate style, blue and white tones, modern tech elements, clean geometric design, 3D render quality, suitable for a professional social media post`;
+
+    await sendLinkedInPost(chatId, `📅 *Today's LinkedIn Post — ${today}*\n\n${post}`, imagePrompt);
+
+    await bot.sendMessage(
+      chatId,
+      `✅ LinkedIn post ready${process.env.LINKEDIN_IMAGE_MODEL ? " with image!" : "!"} Use /li-regenerate for a fresh angle, or /li-topic [idea] for a custom topic.`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err) {
+    clearInterval(typing);
+    console.error(err);
+    bot.sendMessage(chatId, `❌ Something went wrong. Please try again in a moment.`);
+  }
+});
+
+// ─── /li-topic command ────────────────────────────────────────────────────────
+bot.onText(/\/li-topic (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const topic = match[1].trim();
+
+  const typing = setInterval(() => bot.sendChatAction(chatId, "typing"), 4000);
+  bot.sendChatAction(chatId, "typing");
+
+  try {
+    const prompt = `Create a LinkedIn post for my tech company about: "${topic}".
+    Make it insightful, professional, and optimised for LinkedIn's tech audience in India.`;
+
+    const post = await generateLinkedInPost(prompt, chatId);
+    clearInterval(typing);
+
+    const imagePrompt = `Professional LinkedIn post banner, tech topic: ${topic}, minimalist corporate style, blue and white tones, modern tech elements, clean geometric design, 3D render quality, suitable for a professional social media post`;
+
+    await sendLinkedInPost(chatId, `🎯 *LinkedIn Post — ${topic}*\n\n${post}`, imagePrompt);
+  } catch (err) {
+    clearInterval(typing);
+    console.error(err);
+    bot.sendMessage(chatId, `❌ Something went wrong. Try again!`);
+  }
+});
+
+// ─── /li-regenerate command ───────────────────────────────────────────────────
+bot.onText(/\/li-regenerate/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  if (!linkedinSessions[chatId] || linkedinSessions[chatId].length === 0) {
+    return bot.sendMessage(chatId, `⚠️ No previous LinkedIn post found. Use /li-today or /li-topic first!`);
+  }
+
+  const typing = setInterval(() => bot.sendChatAction(chatId, "typing"), 4000);
+  bot.sendChatAction(chatId, "typing");
+
+  try {
+    const prompt = `Regenerate a completely different version of the last LinkedIn post. Use a different hook, different angle, different post type. Make it feel fresh with a different tone and CTA.`;
+
+    const post = await generateLinkedInPost(prompt, chatId);
+    clearInterval(typing);
+
+    const topic = extractTopic(post) || "the same topic";
+    const imagePrompt = `Professional LinkedIn post banner, tech topic: ${topic}, minimalist corporate style, blue and white tones, modern tech elements, clean geometric design, 3D render quality`;
+
+    await sendLinkedInPost(chatId, `🔄 *Regenerated LinkedIn Post*\n\n${post}`, imagePrompt);
   } catch (err) {
     clearInterval(typing);
     console.error(err);
